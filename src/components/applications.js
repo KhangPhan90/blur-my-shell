@@ -221,6 +221,8 @@ export const ApplicationsBlur = class ApplicationsBlur {
     create_blur_effect(meta_window) {
         const pid = meta_window.bms_pid;
         const window_actor = meta_window.get_compositor_private();
+        if (!window_actor)
+            return;
 
         const pipeline = new DummyPipeline(this.effects_manager, this.settings.applications);
         let [blur_actor, bg_manager] = pipeline.create_background_with_effect(
@@ -229,6 +231,7 @@ export const ApplicationsBlur = class ApplicationsBlur {
 
         meta_window.blur_actor = blur_actor;
         meta_window.bg_manager = bg_manager;
+        meta_window.bms_content_actor = this.get_content_actor(window_actor, blur_actor);
 
         // if hacks are selected, force to repaint the window
         if (this.settings.HACKS_LEVEL === 1) {
@@ -242,13 +245,13 @@ export const ApplicationsBlur = class ApplicationsBlur {
 
         // make sure window is blurred in overview
         if (this.settings.applications.BLUR_ON_OVERVIEW)
-            this.enforce_window_visibility_on_overview_for(window_actor);
+            this.enforce_window_visibility_on_overview_for(window_actor, meta_window);
 
         // update the size
         this.update_size(pid);
 
         // set the window actor's opacity
-        this.set_window_opacity(window_actor, this.settings.applications.OPACITY);
+        this.set_window_opacity(window_actor, this.settings.applications.OPACITY, blur_actor);
 
         // now set up the signals, for the window actor only: they are disconnected
         // in `remove_blur`, whereas the signals for the meta window are disconnected
@@ -259,7 +262,11 @@ export const ApplicationsBlur = class ApplicationsBlur {
             window_actor, 'notify::opacity',
             _ => {
                 if (this.focused_window_pid != pid)
-                    this.set_window_opacity(window_actor, this.settings.applications.OPACITY);
+                    this.set_window_opacity(
+                        window_actor,
+                        this.settings.applications.OPACITY,
+                        blur_actor
+                    );
             }
         );
 
@@ -304,13 +311,17 @@ export const ApplicationsBlur = class ApplicationsBlur {
             // if we have blur, hide it and make the window opaque
             if (this.settings.applications.DYNAMIC_OPACITY && blur_actor) {
                 blur_actor.hide();
-                this.set_window_opacity(window_actor, 255);
+                this.set_window_opacity(window_actor, 255, blur_actor);
             }
         }
         // if we remove the focus and have blur, show it and make the window transparent
         else if (blur_actor) {
             blur_actor.show();
-            this.set_window_opacity(window_actor, this.settings.applications.OPACITY);
+            this.set_window_opacity(
+                window_actor,
+                this.settings.applications.OPACITY,
+                blur_actor
+            );
         }
     }
 
@@ -318,30 +329,35 @@ export const ApplicationsBlur = class ApplicationsBlur {
     /// stay visible no matter what.
     /// We can instead hide the last child of the window actor, which will
     /// improve performances without hiding the blur effect.
-    enforce_window_visibility_on_overview_for(window_actor) {
+    enforce_window_visibility_on_overview_for(window_actor, meta_window) {
         this.connections.connect(window_actor, 'notify::visible',
             _ => {
                 if (this.settings.applications.BLUR_ON_OVERVIEW) {
+                    const content_actor =
+                        meta_window.bms_content_actor
+                        && meta_window.bms_content_actor.get_parent() === window_actor
+                            ? meta_window.bms_content_actor
+                            : this.get_content_actor(window_actor, meta_window.blur_actor);
                     if (
                         !window_actor.visible
                         && Main.overview.visible
                     ) {
                         window_actor.show();
-                        window_actor.get_last_child().hide();
+                        content_actor?.hide();
                     }
                     else if (
                         window_actor.visible
                     )
-                        window_actor.get_last_child().show();
+                        content_actor?.show();
                 }
             }
         );
     }
 
     /// Set the opacity of the window actor that sits on top of the blur effect.
-    set_window_opacity(window_actor, opacity) {
+    set_window_opacity(window_actor, opacity, blur_actor = null) {
         window_actor?.get_children().forEach(child => {
-            if (child.name !== "blur-actor" && child.opacity != opacity)
+            if (child !== blur_actor && child.opacity != opacity)
                 child.opacity = opacity;
         });
     }
@@ -353,7 +369,7 @@ export const ApplicationsBlur = class ApplicationsBlur {
         this.meta_window_map.forEach(((meta_window, pid) => {
             if (pid != this.focused_window_pid && meta_window.blur_actor) {
                 let window_actor = meta_window.get_compositor_private();
-                this.set_window_opacity(window_actor, opacity);
+                this.set_window_opacity(window_actor, opacity, meta_window.blur_actor);
             }
         }));
     }
@@ -364,7 +380,7 @@ export const ApplicationsBlur = class ApplicationsBlur {
     compute_allocation(meta_window) {
         const scale_monitor_framebuffer = this.mutter_gsettings.get_strv('experimental-features')
             .includes('scale-monitor-framebuffer');
-        const is_wayland = Meta.is_wayland_compositor();
+        const is_wayland = !Meta.is_wayland_compositor || Meta.is_wayland_compositor();
         const monitor_index = meta_window.get_monitor();
         // check if the window is using wayland, or xwayland/xorg for rendering
         const scale = !scale_monitor_framebuffer && is_wayland && meta_window.get_client_type() == 0
@@ -396,7 +412,7 @@ export const ApplicationsBlur = class ApplicationsBlur {
 
             if (blur_actor && window_actor) {
                 // reset the opacity
-                this.set_window_opacity(window_actor, 255);
+                this.set_window_opacity(window_actor, 255, blur_actor);
 
                 // remove the blurred actor
                 window_actor.remove_child(blur_actor);
@@ -408,6 +424,7 @@ export const ApplicationsBlur = class ApplicationsBlur {
                 // whether we are blurred or not
                 delete meta_window.blur_actor;
                 delete meta_window.bg_manager;
+                delete meta_window.bms_content_actor;
 
                 // disconnect the signals of the window actor
                 this.paint_signals.disconnect_all_for_actor(blur_actor);
@@ -442,6 +459,17 @@ export const ApplicationsBlur = class ApplicationsBlur {
 
         this.connections.disconnect_all();
         this.paint_signals.disconnect_all();
+    }
+
+    get_content_actor(window_actor, blur_actor = null) {
+        const children = window_actor?.get_children() ?? [];
+
+        for (let i = children.length - 1; i >= 0; i--) {
+            if (children[i] !== blur_actor)
+                return children[i];
+        }
+
+        return null;
     }
 
     _log(str) {

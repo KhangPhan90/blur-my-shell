@@ -62,7 +62,7 @@ export const OverviewBlur = class OverviewBlur {
 
             // create a blurred background actor for each monitor during a
             // workspace switch
-            wac_proto._prepareWorkspaceSwitch = function (...params) {
+            this._prepareWorkspaceSwitchWrapper = function (...params) {
                 outer_this._log("prepare workspace switch");
                 outer_this._original_PrepareSwitch.apply(this, params);
 
@@ -74,7 +74,7 @@ export const OverviewBlur = class OverviewBlur {
                     let ws_index = w_m.get_active_workspace_index();
                     [ws_index - 1, ws_index + 1].forEach(
                         i => w_m.get_workspace_by_index(i)?.list_windows().forEach(
-                            window => window.get_compositor_private().show()
+                            window => window.get_compositor_private()?.show()
                         )
                     );
                 }
@@ -95,9 +95,10 @@ export const OverviewBlur = class OverviewBlur {
                             bg_manager._bms_pipeline.actor.visible = true;
                 });
             };
+            wac_proto._prepareWorkspaceSwitch = this._prepareWorkspaceSwitchWrapper;
 
             // remove the workspace-switch actors when the switch is done
-            wac_proto._finishWorkspaceSwitch = function (...params) {
+            this._finishWorkspaceSwitchWrapper = function (...params) {
                 outer_this._log("finish workspace switch");
                 outer_this._original_FinishSwitch.apply(this, params);
 
@@ -108,12 +109,13 @@ export const OverviewBlur = class OverviewBlur {
                     for (let i = 0; i < w_m.get_n_workspaces(); i++) {
                         if (i != w_m.get_active_workspace_index())
                             w_m.get_workspace_by_index(i)?.list_windows().forEach(
-                                window => window.get_compositor_private().hide()
+                                window => window.get_compositor_private()?.hide()
                             );
                     }
 
                 Main.uiGroup.remove_child(outer_this.animation_background_group);
             };
+            wac_proto._finishWorkspaceSwitch = this._finishWorkspaceSwitchWrapper;
 
             this.proto_patched = true;
         }
@@ -206,11 +208,19 @@ export const OverviewBlur = class OverviewBlur {
 
     restore_patched_proto() {
         if (this.proto_patched) {
-            if (this._original_PrepareSwitch)
+            if (
+                this._original_PrepareSwitch
+                && wac_proto._prepareWorkspaceSwitch === this._prepareWorkspaceSwitchWrapper
+            )
                 wac_proto._prepareWorkspaceSwitch = this._original_PrepareSwitch;
-            if (this._original_FinishSwitch)
+            if (
+                this._original_FinishSwitch
+                && wac_proto._finishWorkspaceSwitch === this._finishWorkspaceSwitchWrapper
+            )
                 wac_proto._finishWorkspaceSwitch = this._original_FinishSwitch;
 
+            this._prepareWorkspaceSwitchWrapper = null;
+            this._finishWorkspaceSwitchWrapper = null;
             this.proto_patched = false;
         }
     }
